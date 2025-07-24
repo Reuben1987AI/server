@@ -262,26 +262,111 @@ def get_score_words_wfed():
         return jsonify({"server error from get_score_words_wfed": str(e)}), 500
 
 
-@app.route("/feedback", methods=["GET"])
+@app.route("/transcribe", methods=["POST"])
+@cross_origin()
+def transcribe():
+    """
+    Endpoint for general timestamped transcription of audio files.
+    Accepts audio files via multipart/form-data and returns phonemes with timestamps.
+    """
+    try:
+        # Check if audio file is provided
+        if 'audio' not in request.files:
+            return jsonify({"error": "No audio file provided"}), 400
+        
+        audio_file = request.files['audio']
+        if audio_file.filename == '':
+            return jsonify({"error": "No audio file selected"}), 400
+        
+        # Read and process audio file using soundfile
+        audio_bytes = audio_file.read()
+        
+        try:
+            # Use soundfile to properly decode audio files (WAV, MP3, etc.)
+            audio_io = io.BytesIO(audio_bytes)
+            speech_audio, sample_rate = sf.read(audio_io, dtype='float32')
+            
+            # Ensure mono audio
+            if speech_audio.ndim > 1:
+                speech_audio = np.mean(speech_audio, axis=1)
+            
+            # Resample to 16kHz if necessary
+            if sample_rate != SAMPLE_RATE:
+                # Simple resampling - for production use librosa.resample
+                from scipy import signal
+                speech_audio = signal.resample(speech_audio, int(len(speech_audio) * SAMPLE_RATE / sample_rate))
+            
+        except Exception as decode_error:
+            # Fallback: try to parse as raw float32 data (for WebSocket compatibility)
+            try:
+                speech_audio = np.frombuffer(audio_bytes, dtype=np.float32)
+            except ValueError:
+                return jsonify({"error": f"Unable to decode audio file: {str(decode_error)}"}), 400
+        
+        # Validate audio length
+        if len(speech_audio) < SAMPLE_RATE * 0.1:
+            return jsonify({"error": f"Audio too short: {len(speech_audio)} samples, minimum required: {int(SAMPLE_RATE * 0.1)}"}), 400
+        
+        # Transcribe with timestamps
+        _, phonemes_with_time = transcribe_timestamped(speech_audio)
+        
+        # Convert to the required format: [["phoneme", start_time, end_time], ...]
+        result = [[phoneme, start_time, end_time] for phoneme, start_time, end_time in phonemes_with_time]
+        
+        return jsonify(result)
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route("/feedback", methods=["POST"])
 @cross_origin()
 def get_feedback():
-    target = request.form["target"].strip()
-    target_by_words = json.loads(request.form["tbw"])
-    audio_bytes = request.files["audio"].read()
-    speech_audio = np.frombuffer(audio_bytes, dtype=np.float32)
+    try:
+        target = request.form["target"].strip()
+        target_by_words = json.loads(request.form["tbw"])
+        audio_bytes = request.files["audio"].read()
+        
+        try:
+            # Use soundfile to properly decode audio files (WAV, MP3, etc.)
+            audio_io = io.BytesIO(audio_bytes)
+            speech_audio, sample_rate = sf.read(audio_io, dtype='float32')
+            
+            # Ensure mono audio
+            if speech_audio.ndim > 1:
+                speech_audio = np.mean(speech_audio, axis=1)
+            
+            # Resample to 16kHz if necessary
+            if sample_rate != SAMPLE_RATE:
+                # Simple resampling - for production use librosa.resample
+                from scipy import signal
+                speech_audio = signal.resample(speech_audio, int(len(speech_audio) * SAMPLE_RATE / sample_rate))
+                
+        except Exception as decode_error:
+            # Fallback: try to parse as raw float32 data (for WebSocket compatibility)
+            try:
+                speech_audio = np.frombuffer(audio_bytes, dtype=np.float32)
+            except ValueError:
+                return jsonify({"error": f"Unable to decode audio file: {str(decode_error)}"}), 400
 
-    if len(speech_audio) < SAMPLE_RATE * 0.1:
-        raise ValueError(f"Audio too short: {len(speech_audio)} samples")
+        if len(speech_audio) < SAMPLE_RATE * 0.1:
+            raise ValueError(f"Audio too short: {len(speech_audio)} samples")
 
-    speech_phones, timestamps = transcribe_timestamped(speech_audio)
-    out = feedback(
-        target,
-        target_by_words,
-        speech_audio,
-        speech_phones,
-        timestamps,  # per-phoneme timing info
-    )
-    return jsonify(out)
+        speech_phones, timestamps = transcribe_timestamped(speech_audio)
+        out = feedback(
+            target,
+            target_by_words,
+            speech_audio,
+            speech_phones,
+            timestamps,  # per-phoneme timing info
+        )
+        return jsonify(out)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
 @sock.route("/stream")
@@ -317,6 +402,71 @@ def stream(ws):
                         new_transcription = transcribe_audio(combined)
                         full_transcription.extend(new_transcription)
                         ws.send(json.dumps(full_transcription))
+                        combined = np.array([], dtype=np.float32)
+                        num_chunks_accumulated = 0
+                        transcription = []
+
+                    if DEBUG:
+                        wavfile.write("audio.wav", SAMPLE_RATE, audio)
+                        wavfile.write("combined.wav", SAMPLE_RATE, combined)
+
+                    buffer = b""  # Clear the buffer
+        except Exception as e:
+            print(f"Error: {e}")
+            print(f"Line: {e.__traceback__.tb_lineno if e.__traceback__ else -1}")
+            break
+
+
+@sock.route("/stream_timestamped")
+def stream_timestamped(ws):
+    buffer = b""  # Buffer to hold audio chunks
+
+    full_transcription = []
+    combined = np.array([], dtype=np.float32)
+    num_chunks_accumulated = 0
+    transcription = []
+    
+    # Track what has been sent to client to enable incremental responses
+    previously_sent_count = 0
+
+    while True:
+        try:
+            # Receive audio data from the client
+            data = ws.receive()
+            if data:
+                buffer += data
+                # Process chunks when buffer reaches certain size
+                if (
+                    len(buffer) // 4 > SAMPLE_RATE * NUM_SECONDS_PER_CHUNK
+                ):  # Adjust size for chunk processing
+                    num_chunks_accumulated += 1
+
+                    audio = np.frombuffer(buffer, dtype=np.float32)
+                    combined = np.concatenate([combined, audio])
+
+                    if num_chunks_accumulated < NUM_CHUNKS_ACCUMULATED:
+                        # transcribe_timestamped returns (transcription_text, phonemes_with_time)
+                        _, new_phonemes_with_time = transcribe_timestamped(audio)
+                        # Convert tuples to lists for JSON serialization: [[phoneme, start_time, end_time], ...]
+                        new_transcription = [[phoneme, start_time, end_time] for phoneme, start_time, end_time in new_phonemes_with_time]
+                        transcription.extend(new_transcription)
+                        
+                        # Send only newly detected phonemes (incremental response)
+                        current_total = full_transcription + transcription
+                        new_phonemes = current_total[previously_sent_count:]
+                        ws.send(json.dumps(new_phonemes))
+                        previously_sent_count = len(current_total)
+                    else:
+                        _, combined_phonemes_with_time = transcribe_timestamped(combined)
+                        # Convert tuples to lists for JSON serialization: [[phoneme, start_time, end_time], ...]
+                        new_transcription = [[phoneme, start_time, end_time] for phoneme, start_time, end_time in combined_phonemes_with_time]
+                        full_transcription.extend(new_transcription)
+                        
+                        # Send only newly detected phonemes (incremental response)
+                        new_phonemes = full_transcription[previously_sent_count:]
+                        ws.send(json.dumps(new_phonemes))
+                        previously_sent_count = len(full_transcription)
+                        
                         combined = np.array([], dtype=np.float32)
                         num_chunks_accumulated = 0
                         transcription = []
