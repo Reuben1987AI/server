@@ -22,6 +22,68 @@ from scipy.io import wavfile
 
 DEBUG = True
 
+def process_audio_with_format(audio_bytes, audio_format=None):
+    """
+    Process audio based on explicit format or auto-detection
+    Returns: (audio_array, sample_rate)
+    """
+    if audio_format == 'pcm_16000':
+        # Process raw PCM 16-bit at 16kHz
+        print(f"Processing as raw PCM 16kHz (explicit format): {len(audio_bytes)} bytes")
+        return process_raw_pcm_16000(audio_bytes)
+    
+    # Default: existing auto-detection behavior
+    print(f"Using auto-detection/existing processing: {len(audio_bytes)} bytes")
+    return process_audio_existing(audio_bytes)
+
+def process_raw_pcm_16000(audio_bytes):
+    """Convert raw 16-bit PCM at 16kHz to normalized float32"""
+    try:
+        # Convert to 16-bit integers
+        pcm_samples = np.frombuffer(audio_bytes, dtype=np.int16)
+        
+        # Normalize to [-1.0, 1.0]
+        audio_float = pcm_samples.astype(np.float32) / 32768.0
+        
+        # ElevenLabs PCM format is 16kHz
+        sample_rate = 16000
+        
+        print(f"Processed raw PCM: {len(pcm_samples)} samples, "
+              f"range: [{audio_float.min():.3f}, {audio_float.max():.3f}]")
+        
+        return audio_float, sample_rate
+        
+    except Exception as e:
+        raise ValueError(f"Raw PCM processing failed: {e}")
+
+def process_audio_existing(audio_bytes):
+    """Existing audio processing logic (soundfile + fallback)"""
+    try:
+        # Use soundfile to properly decode audio files (WAV, MP3, etc.)
+        audio_io = io.BytesIO(audio_bytes)
+        speech_audio, sample_rate = sf.read(audio_io, dtype='float32')
+        
+        # Ensure mono audio
+        if speech_audio.ndim > 1:
+            speech_audio = np.mean(speech_audio, axis=1)
+        
+        # Resample to 16kHz if necessary
+        if sample_rate != SAMPLE_RATE:
+            # Simple resampling - for production use librosa.resample
+            from scipy import signal
+            speech_audio = signal.resample(speech_audio, int(len(speech_audio) * SAMPLE_RATE / sample_rate))
+            sample_rate = SAMPLE_RATE
+        
+        return speech_audio, sample_rate
+        
+    except Exception as decode_error:
+        # Fallback: try to parse as raw float32 data (for WebSocket compatibility)
+        try:
+            speech_audio = np.frombuffer(audio_bytes, dtype=np.float32)
+            return speech_audio, SAMPLE_RATE
+        except ValueError:
+            raise ValueError(f"Unable to decode audio file: {str(decode_error)}")
+
 # Constants
 SAMPLE_RATE = 16000
 NUM_SECONDS_PER_CHUNK = 2
@@ -268,6 +330,14 @@ def transcribe():
     """
     Endpoint for general timestamped transcription of audio files.
     Accepts audio files via multipart/form-data and returns phonemes with timestamps.
+    
+    Parameters:
+    - audio (file, required): Audio file or raw audio data
+    - audio_format (string, optional): Specifies the format of the audio data
+      
+    Supported audio_format values:
+    - "pcm_16000": Raw 16-bit PCM at 16kHz mono (signed little-endian)
+    - null/missing: Auto-detect format (supports WAV, MP3, FLAC, etc.)
     """
     try:
         # Check if audio file is provided
@@ -278,30 +348,19 @@ def transcribe():
         if audio_file.filename == '':
             return jsonify({"error": "No audio file selected"}), 400
         
-        # Read and process audio file using soundfile
+        # Get optional audio_format parameter
+        audio_format = request.form.get('audio_format', None)
+        
+        # Validate audio_format parameter
+        valid_formats = ['pcm_16000']
+        if audio_format is not None and audio_format not in valid_formats:
+            return jsonify({"error": f"Invalid audio_format: '{audio_format}'. Valid formats: {valid_formats}"}), 400
+        
+        # Read audio data
         audio_bytes = audio_file.read()
         
-        try:
-            # Use soundfile to properly decode audio files (WAV, MP3, etc.)
-            audio_io = io.BytesIO(audio_bytes)
-            speech_audio, sample_rate = sf.read(audio_io, dtype='float32')
-            
-            # Ensure mono audio
-            if speech_audio.ndim > 1:
-                speech_audio = np.mean(speech_audio, axis=1)
-            
-            # Resample to 16kHz if necessary
-            if sample_rate != SAMPLE_RATE:
-                # Simple resampling - for production use librosa.resample
-                from scipy import signal
-                speech_audio = signal.resample(speech_audio, int(len(speech_audio) * SAMPLE_RATE / sample_rate))
-            
-        except Exception as decode_error:
-            # Fallback: try to parse as raw float32 data (for WebSocket compatibility)
-            try:
-                speech_audio = np.frombuffer(audio_bytes, dtype=np.float32)
-            except ValueError:
-                return jsonify({"error": f"Unable to decode audio file: {str(decode_error)}"}), 400
+        # Process audio based on format
+        speech_audio, sample_rate = process_audio_with_format(audio_bytes, audio_format)
         
         # Validate audio length
         if len(speech_audio) < SAMPLE_RATE * 0.1:
@@ -312,6 +371,8 @@ def transcribe():
         
         # Convert to the required format: [["phoneme", start_time, end_time], ...]
         result = [[phoneme, start_time, end_time] for phoneme, start_time, end_time in phonemes_with_time]
+
+        print('/transcribe', result)
         
         return jsonify(result)
         
