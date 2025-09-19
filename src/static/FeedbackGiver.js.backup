@@ -239,13 +239,6 @@ export class FeedbackGiver {
       await this.audioContext.resume();
     }
 
-    // Load libsamplerate-js AudioWorklet module first
-    try {
-      await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
-    } catch (error) {
-      console.warn('Failed to load libsamplerate.worklet.js, will use fallback resampling:', error);
-    }
-
     // Load the AudioWorkletProcessor (which handles audio processing)
     await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/WavWorklet.js`);
     this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'wav-worklet');
