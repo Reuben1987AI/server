@@ -7,10 +7,7 @@ class WavWorklet extends AudioWorkletProcessor {
     this.needsResampling = false;
     this.resampleBuffer = [];
     this.resampleRatio = 1.0;
-    // LibSampleRate
-    this.resampler = null;
-    this.resamplerInitialized = false;
-    this.libSampleRateAvailable = false;
+    this.resampler = null; // LibSampleRate
   }
 
   process(inputs, outputs, parameters) {
@@ -43,72 +40,52 @@ class WavWorklet extends AudioWorkletProcessor {
     return true;
   }
 
-  initializeLibSampleRate() {}
+  async initializeLibSampleRate() {
+    // Check if LibSampleRate is available in the global scope
+    if (typeof globalThis.LibSampleRate === 'undefined') {
+      console.warn('LibSampleRate not available, falling back to linear interpolation:');
+      return;
+    }
+
+    console.log('Using LibSampleRate for resampling');
+    try {
+      const { create, ConverterType } = globalThis.LibSampleRate;
+      this.resampler = await create(
+        1, // mono channel
+        this.sourceSampleRate,
+        this.targetSampleRate,
+        { converterType: ConverterType.SRC_SINC_FASTEST },
+      );
+      console.log('libsamplerate-js resampler initialized successfully');
+    } catch (error) {
+      console.warn(
+        'Failed to initialize libsamplerate-js, falling back to linear interpolation:',
+        error,
+      );
+    }
+  }
 
   async handleMessage(event) {
-    if (event.data.type === "init") {
+    if (event.data.type === 'init') {
       const data = event.data;
       this.sourceSampleRate = data.sourceSampleRate;
       this.targetSampleRate = data.targetSampleRate;
       this.needsResampling = data.sourceSampleRate !== data.targetSampleRate;
       this.resampleRatio = data.sourceSampleRate / data.targetSampleRate;
-
-      // Check if LibSampleRate is available in the global scope
-      if (typeof globalThis.LibSampleRate !== "undefined") {
-        this.libSampleRateAvailable = true;
-        console.log('Using LibSampleRate for resampling');
-      } else {
-        console.warn(
-          "LibSampleRate not available, falling back to linear interpolation:",
-        );
-        this.libSampleRateAvailable = false;
-      }
-
-      // Initialize libsamplerate-js resampler if available and resampling is needed
-      if (this.needsResampling && this.libSampleRateAvailable) {
-        try {
-          const { create, ConverterType } = globalThis.LibSampleRate;
-          this.resampler = await create(
-            1, // mono channel
-            this.sourceSampleRate,
-            this.targetSampleRate,
-            { converterType: ConverterType.SRC_SINC_FASTEST },
-          );
-          this.resamplerInitialized = true;
-          console.log("libsamplerate-js resampler initialized successfully");
-        } catch (error) {
-          console.warn(
-            "Failed to initialize libsamplerate-js, falling back to linear interpolation:",
-            error,
-          );
-          this.resamplerInitialized = false;
-        }
+      if (this.needsResampling) {
+        this.initializeLibSampleRate();
       }
     }
   }
 
   resample(inputData) {
-    if (!this.needsResampling) {
-      return inputData;
-    }
-
-    // Handle empty input buffer.
-    if (inputData.length === 0) {
+    if (!this.needsResampling || inputData.length === 0) {
       return inputData;
     }
 
     // Use libsamplerate-js if available and initialized
-    if (this.resamplerInitialized && this.resampler) {
-      try {
-        console.log(inputData);
-        return this.resampler.full(inputData);
-      } catch (error) {
-        console.warn(
-          "libsamplerate-js resampling failed, falling back to linear interpolation:",
-          error,
-        );
-        // Fall through to linear interpolation
-      }
+    if (this.resampler) {
+      return this.resampler.full(inputData);
     }
 
     // Fallback: Linear interpolation (original implementation)
@@ -116,15 +93,7 @@ class WavWorklet extends AudioWorkletProcessor {
   }
 
   linearResample(inputData) {
-    // Calculate the output buffer length.
-    // This formula correctly maps the endpoints of the input and output buffers,
-    // ensuring that the last sample of the output corresponds to the last sample of the input.
-    //
-    // It's derived from the relationship: (outputLength - 1) * resampleRatio ≈ (inputData.length - 1).
-    // This prevents both reading past the input buffer during interpolation (when upsampling)
-    // and dropping samples from the end of the buffer (when downsampling).
-    const outputLength =
-      Math.floor((inputData.length - 1) / this.resampleRatio) + 1;
+    const outputLength = Math.floor((inputData.length - 1) / this.resampleRatio) + 1;
     const outputData = new Float32Array(outputLength);
 
     for (let i = 0; i < outputLength; i++) {
@@ -135,8 +104,7 @@ class WavWorklet extends AudioWorkletProcessor {
       if (sourceIndexInt + 1 < inputData.length) {
         // Linear interpolation
         outputData[i] =
-          inputData[sourceIndexInt] * (1 - fraction) +
-          inputData[sourceIndexInt + 1] * fraction;
+          inputData[sourceIndexInt] * (1 - fraction) + inputData[sourceIndexInt + 1] * fraction;
       } else {
         outputData[i] = inputData[sourceIndexInt];
       }
@@ -146,4 +114,4 @@ class WavWorklet extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("wav-worklet", WavWorklet);
+registerProcessor('wav-worklet', WavWorklet);
