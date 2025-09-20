@@ -193,6 +193,7 @@ export class FeedbackGiver {
     this.store_audio_chunks = [];
     this.userAudioBuffer = null;
     this.transcription = [];
+    let usingLocalResampler = false;
 
     // Open WebSocket connection
     this.socket = new WebSocket(
@@ -222,6 +223,8 @@ export class FeedbackGiver {
         this.audioInput = this.audioContext.createMediaStreamSource(stream);
       } catch (error) {
         // If the above fails, it's likely Firefox.
+        usingLocalResampler = true;
+
         if (this.audioContext) {
           this.audioContext.close();
         }
@@ -239,15 +242,16 @@ export class FeedbackGiver {
       await this.audioContext.resume();
     }
 
-    // Load libsamplerate-js AudioWorklet module first
-    try {
-      await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
-    } catch (error) {
-      console.warn('Failed to load libsamplerate.worklet.js, will use fallback resampling:', error);
-    }
-
     // Load the AudioWorkletProcessor (which handles audio processing)
     await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/WavWorklet.js`);
+
+    // Load libsamplerate-js AudioWorklet module after the worklet
+    if(usingLocalResampler) {
+      await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
+    }
+ 
+    await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
+
     this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'wav-worklet');
 
     // Send sample rate info to worklet
