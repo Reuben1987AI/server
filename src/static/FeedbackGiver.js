@@ -207,7 +207,7 @@ export class FeedbackGiver {
     };
 
     // Start capturing audio (microphone)
-    const stream = await navigator.mediaDevices.getUserMedia({
+    this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: { sampleRate: SAMPLE_RATE },
     });
 
@@ -220,7 +220,7 @@ export class FeedbackGiver {
           latencyHint: 'interactive',
         });
         // This will throw a NotSupportedError in Firefox if the sample rates don't match
-        this.audioInput = this.audioContext.createMediaStreamSource(stream);
+        this.audioInput = this.audioContext.createMediaStreamSource(this.mediaStream);
       } catch (error) {
         // If the above fails, it's likely Firefox.
         usingLocalResampler = true;
@@ -228,13 +228,16 @@ export class FeedbackGiver {
         if (this.audioContext) {
           this.audioContext.close();
         }
-        console.warn('Native resampling failed, falling back to JavaScript-based resampling.', error);
+        console.warn(
+          'Native resampling failed, falling back to JavaScript-based resampling.',
+          error,
+        );
 
         // Fallback: Use the browser's default sample rate and resample in the worklet.
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
           latencyHint: 'interactive',
         });
-        this.audioInput = this.audioContext.createMediaStreamSource(stream);
+        this.audioInput = this.audioContext.createMediaStreamSource(this.mediaStream);
       }
     }
 
@@ -246,10 +249,12 @@ export class FeedbackGiver {
     await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/WavWorklet.js`);
 
     // Load libsamplerate-js AudioWorklet module after the worklet
-    if(usingLocalResampler) {
-      await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
+    if (usingLocalResampler) {
+      await this.audioContext.audioWorklet.addModule(
+        `${this.serverorigin}/libsamplerate.worklet.js`,
+      );
     }
- 
+
     await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
 
     this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'wav-worklet');
