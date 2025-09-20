@@ -255,8 +255,6 @@ export class FeedbackGiver {
       );
     }
 
-    await this.audioContext.audioWorklet.addModule(`${this.serverorigin}/libsamplerate.worklet.js`);
-
     this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'wav-worklet');
 
     // Send sample rate info to worklet
